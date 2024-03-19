@@ -1,0 +1,11 @@
+name = "jifc"
+version = "1.0.0"
+group = "dev.levia.jifc"
+
+[support]
+maven = "https://repo1.maven.org/maven2/group/name/version/name-version.jar"
+search = "https://search.maven.org/search?q"
+
+[libs]
+[test-libs]
+[local-libs]
