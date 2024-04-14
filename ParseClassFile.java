@@ -1,4 +1,5 @@
 import java.util.Map;
+
 import java.util.HashMap;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -17,33 +18,12 @@ public class ParseClassFile {
 	private static Map<String, Object> tokens = new HashMap<String, Object>();
 	private static List<Object> constants = new ArrayList<Object>();
 
-	public static void printTokens(Map<String, Object> tokens) {
-		for (Map.Entry<String, Object> entry : tokens.entrySet()) {
-			var val = entry.getValue();
-
-			if (val instanceof List) {
-				try {
-					System.out.println(entry.getKey());
-					for (Object o : (List<Object>) val) {
-						System.out.println("\t"+o);
-					}
-				} catch (Exception e) {
-					System.out.println(e.getMessage());
-					System.out.println(e.getStackTrace());
-				}
-			} else {
-				System.out.println(entry.getKey() + ": " + val);
-			}
-		}
-	}
-
-
 	public static Map<String, Object> parseClassFile(String filename) throws IOException {
 		var file = Files.readAllBytes(Paths.get(filename));
 
 		// Magic number
 		pointer = 4;
-		printHex("magic", new byte[]{file[0], file[1], file[2], file[3]});
+		LogUtils.printHex("magic", new byte[]{file[0], file[1], file[2], file[3]});
 		tokens.put("versionMajor", getShort(file));
 		tokens.put("versionMinor", getShort(file));
 
@@ -55,12 +35,12 @@ public class ParseClassFile {
 		tokens.put("thisClass", constants.get((short) constants.get(getShort(file)-1)-1));
 		tokens.put("superClass", constants.get((short) constants.get(getShort(file)-1)-1));
 
-		tokens.put("interfaces", getVariablesArray(file, (byte) 1));
-		tokens.put("fields", getVariablesArray(file, (byte) 2));
-		tokens.put("methods", getVariablesArray(file, (byte) 3));
-		tokens.put("attributes", getVariablesArray(file, (byte) 4));
+		tokens.put("interfaces", interfaceConvert(file));
+		tokens.put("fields", fieldConvert(file));
+		tokens.put("methods", methodConvert(file));
+		tokens.put("attributes", attributeConvert(file));
 
-		printTokens(tokens);
+		LogUtils.printTokens(tokens);
 		return tokens;
 	}
 	public static boolean checkByte(short b, int checker) {
@@ -85,7 +65,7 @@ public class ParseClassFile {
 		int count = (Byte.toUnsignedInt(content[pointer++]) << 8) | Byte.toUnsignedInt(content[pointer++]);
 
 		var list = new ArrayList<Object>();
-		printHex("count: "+count+" position", new byte[] {content[pointer-2], content[pointer-1]});
+		LogUtils.printHex("count: "+count, new byte[] {content[pointer-2], content[pointer-1]});
 		
 		if (type == 0) {
 			for (int i = 0; i < (count-1); i++) {
@@ -94,14 +74,11 @@ public class ParseClassFile {
 			}
 			System.out.println("ending pool conversion");
 		}
-		else if (type == 1) interfaceConvert(content, count);
-		else if (type == 2) fieldConvert(content, count);
-		else if (type == 3) methodConvert(content, count);
-		else if (type == 4) attributeConvert(content, count);
 		return list;
 	}
 	public static record FieldInfo(String accessFlags, String name_index, String descriptor_index, short attributes_count, Map<Short, Byte[]> attributes) {}
-	public static List<FieldInfo> fieldConvert(byte[] content, int size) {
+	public static List<FieldInfo> fieldConvert(byte[] content) {
+		var size = getShort(content);
 		var list = new ArrayList<FieldInfo>();
 		for (int i = 0; i < size; i++) {
 			var accessFlag = convertAccessFlagsToString((short) (getShort(content) - ((short) 1)));
@@ -111,18 +88,19 @@ public class ParseClassFile {
 
 			var attributes = new HashMap<Short, Byte[]>();
 			for (int j = 0; j < attributes_count; j++) {
-				var nameIndex = (short) (content[pointer++]<<8 | content[pointer++]);
-				var length = content[pointer++]<<24 | content[pointer++]<<16 | content[pointer++]<<8 | content[pointer++];
-				var value = new Byte[length];
-				for (int k = 0; k < length; k++)
-					value[j] = content[pointer++];
-				attributes.put(nameIndex, value);
+				var attribute_name_index = (short) (content[pointer++]<<8 | content[pointer++]);
+				var attributes_length = content[pointer++]<<24 | content[pointer++]<<16 | content[pointer++]<<8 | content[pointer++];
+				var info = new Byte[attributes_length];
+				for (int k = 0; k < attributes_length; k++)
+					info[j] = content[pointer++];
+				attributes.put(attribute_name_index, info);
 			}
 			list.add(new FieldInfo(accessFlag, name_index, descriptor_index, attributes_count, attributes));
 		}
 		return list;
 	}
-	public static List<String> interfaceConvert(byte[] content, int size) {
+	public static List<String> interfaceConvert(byte[] content) {
+		var size = getShort(content);
 		try {
 			var list = new ArrayList<String>();
 			for (int i = 0; i < size; i++) {
@@ -138,44 +116,100 @@ public class ParseClassFile {
 		}
 		return List.of();
 	}
-	private record MethodInfo(String accessFlags, String name_index, String descriptor_index, short attributes_count, List<AttributeInfo> attributes) {}
-	public static List<MethodInfo> methodConvert(byte[] content, int size) {
+	private record MethodInfo(String accessFlags, String name_index, 
+			String descriptor_index, short attributes_count, List<AttributeInfo> attributes) {}
+
+	public static List<MethodInfo> methodConvert(byte[] content) {
+		var size = getShort(content);
 		var list = new ArrayList<MethodInfo>();
 		System.out.println("Methods count: " + size);
+		var translator = new ByteCodeConvertor();
 
 		for (int i = 0; i < size; i++) {
-			var accessFlag = convertAccessFlagsToString((short) (content[pointer++]<<8 | content[pointer++]));
+			var accessFlag = convertAccessFlagsToString(getShort(content));
+			var name = (String) constants.get(getShort(content) - 1);
+			var descriptor = (String) constants.get(getShort(content) - 1);
 
-			var name_index = (String) constants.get(getShort(content) - 1);
-			// System.out.println("descriptor index: " + (short) (content[pointer++]<<8 | content[pointer++]));
-			var descriptor_index = (String) constants.get(getShort(content) - 1);
-			var attributes_count = getShort(content);
+			var methodAttr = attributeConvert(content);
+			System.out.println("Method name: " + name + " descriptor: " + 
+					descriptor + " attributes count: " + methodAttr.size());
 
-			var attributes = new ArrayList<AttributeInfo>(
-					attributeConvert(content, attributes_count));
-			list.add(new MethodInfo(accessFlag, name_index, descriptor_index, attributes_count, attributes));
-			System.out.println("accessFlags: " + accessFlag + " name_index: " + name_index + " descriptor_index: " + descriptor_index + " attributes_count: " + attributes_count);
-			for (int j = 0; j < attributes_count; j++) {
-				printHex(
-					attributes.get(j).name_index + " " + attributes.get(j).length + " ", 
-					attributes.get(j).value
-				);
-			}
+			methodAttr.stream().forEach(attr -> {
+				list.add(new MethodInfo(accessFlag, name, 
+							descriptor, (short) methodAttr.size(), methodAttr));
+
+				if (attr.name_index.equals("Code")) {
+					System.out.println("Code attribute: " + attr.length);
+					translator.instructionConvert(attr.value, constants);
+				} else {
+					LogUtils.printHex(attr.name_index + " " + attr.length + " ", attr.value);
+				}
+			});
 		}
 
 		return list;
 	}
 	private record AttributeInfo(String name_index, int length, byte[] value) {}
-	public static List<AttributeInfo> attributeConvert(byte[] content, int size) {
+	public static List<AttributeInfo> attributeConvert(byte[] content, int pointerOutside) {
+		// still letting use this function out of scope
+		var size = getShort(content, pointerOutside);
+
 		var list = new ArrayList<AttributeInfo>();
+
 		for (int i = 0; i < size; i++) {
-			var nameIndex = (String) constants.get(getShort(content) - 1);
+			var name_index = getShort(content, pointerOutside);
+			System.out.println("attribute name index: " + name_index);
+			String name;
+			try {
+				name = String.valueOf(constants.get(name_index - 1));
+				System.out.println("attribute name: " + name);
+			} catch (Exception e) {
+				name = Integer.toString((Integer) constants.get(name_index - 1));
+			}
+			int length = getInteger(content, pointer);
+			var value = new byte[length];
+			for (int j = 0; j < length; j++) value[j] = content[pointerOutside++];
+			list.add(new AttributeInfo(name, length, value));
+			LogUtils.printHex("attribute name: " + name + " length: " + length, value);
+		}
+
+		return list;
+	}
+	
+	// should be move to another class
+	public static int getShort(byte[] content, int pointerOutside) {
+		return Byte.toUnsignedInt(content[pointerOutside++]) << 8 | 
+			Byte.toUnsignedInt(content[pointerOutside++]);
+	}
+	public static int getInteger(byte[] content, int pointerOutside) {
+		return Byte.toUnsignedInt(content[pointerOutside++]) << 24 | Byte.toUnsignedInt(content[pointerOutside++]) << 16 |
+			Byte.toUnsignedInt(content[pointerOutside++]) << 8 | Byte.toUnsignedInt(content[pointerOutside++]);
+	}
+	/*
+	 * returns a list of attributes
+	 *
+	 * attribute_info { 
+	 *		u2 attribute_name_index; 
+	 *		u4 attribute_length; 
+	 *		u1 info[attribute_length]; 
+	 * }
+	*/
+	public static List<AttributeInfo> attributeConvert(byte[] content) {
+		// return attributeConvert(content, pointer);
+		var size = getShort(content);
+		var list = new ArrayList<AttributeInfo>();
+
+		for (int i = 0; i < size; i++) {
+			var name_index = getShort(content);
+			System.out.println("attribute name index: " + name_index);
+			var name = (String) constants.get(name_index - 1);
 			int length = getInteger(content);
 			var value = new byte[length];
-			for (int j = 0; j < length; j++)
-				value[j] = content[pointer++];
-			list.add(new AttributeInfo(nameIndex, length, value));
+			for (int j = 0; j < length; j++) value[j] = content[pointer++];
+			list.add(new AttributeInfo(name, length, value));
+			LogUtils.printHex("attribute name: " + name + " length: " + length, value);
 		}
+
 		return list;
 	}
 	public static int getInteger(byte[] content) {
@@ -183,7 +217,12 @@ public class ParseClassFile {
 				Byte.toUnsignedInt(content[pointer++]) << 8 | Byte.toUnsignedInt(content[pointer++]);
 	}
 	public static short getShort(byte[] content) {
-		return ((Integer) (Byte.toUnsignedInt(content[pointer++]) << 8 | Byte.toUnsignedInt(content[pointer++]))).shortValue();
+		var x = ((Integer) (
+					Byte.toUnsignedInt(content[pointer++]) << 8 | 
+					Byte.toUnsignedInt(content[pointer++])
+				)).shortValue();
+		LogUtils.printHex("short: "+x, new byte[] {content[pointer-2], content[pointer-1]});
+		return x;
 	}
 
 	public static Object poolConvert(byte[] content) {
@@ -248,19 +287,4 @@ public class ParseClassFile {
 		return value;
 	}
 
-	public static void printInteger(String key, Byte[] args) {
-		var num = 0;
-		for (int i = 0; i < args.length; i++) {
-			num = (num << 8) | (args[i] & 0xFF);
-		}
-		System.out.println(key + ": " + num);
-	}
-
-	public static void printHex(String key, byte[] bytes) {
-		System.out.print(key + ": ");
-		for (int i = 0; i < bytes.length; i++) {
-			System.out.printf("%02X", bytes[i]);
-		}
-		System.out.println();
-	}
 }
